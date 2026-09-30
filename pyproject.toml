@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quintoandar-client"
+version = "0.1.0"
+description = "Read-only Python client and parsers for public QuintoAndar property data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Thiago Chagas" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/tqchagas/quintoandar"
+Issues = "https://github.com/tqchagas/quintoandar/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
