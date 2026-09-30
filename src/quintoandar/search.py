@@ -179,10 +179,10 @@ def _rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int | None]:
     hits = payload.get("hits")
     rows = hits.get("hits") if isinstance(hits, dict) else None
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise RequestFailed("invalid_search_payload")
+        raise RequestFailed("invalid_payload_structure")
     values = [row.get("_source", row) for row in rows]
     if any(not isinstance(row, dict) for row in values):
-        raise RequestFailed("invalid_search_payload")
+        raise RequestFailed("invalid_payload_structure")
     return values, _total(hits.get("total"))
 
 
