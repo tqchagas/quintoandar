@@ -24,6 +24,7 @@ import json
 import math
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -86,6 +87,126 @@ class CondoRow:
     installations: list[str] | None
     doorman: str | None
     source_lastmod: date | None
+
+
+@dataclass(frozen=True)
+class CondoAddress:
+    """Endereço normalizado pelo consumidor, por exemplo a partir de ITBI."""
+
+    city: str
+    street: str
+    street_number: str | None = None
+    postal_code: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+
+
+@dataclass(frozen=True)
+class CondoMatch:
+    """Candidato ordenado por evidências de endereço, não uma certeza jurídica."""
+
+    condominium: CondoRow
+    score: int
+    evidence: tuple[str, ...]
+
+
+def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distância haversine entre coordenadas em graus."""
+    radius_m = 6_371_000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    value = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return 2 * radius_m * math.asin(math.sqrt(min(1.0, value)))
+
+
+def match_condominiums(
+    address: CondoAddress, candidates: Iterable[CondoRow]
+) -> list[CondoMatch]:
+    """Rank candidates matching a city/street address using available evidence.
+
+    City and normalized street must match. A known, conflicting street number
+    excludes a candidate. Number, postal code, and coordinates add evidence;
+    ties remain in the result so the consumer can handle ambiguity explicitly.
+    Scores are ranking points, not probabilities.
+    """
+    city_key = _address_key(address.city)
+    street_key = _street_key(address.street)
+    if city_key is None or street_key is None:
+        raise ValueError("city_and_street_are_required")
+    number_key = _address_key(address.street_number)
+    postal_key = re.sub(r"\D", "", str(address.postal_code or "")) or None
+    if (address.lat is None) != (address.lon is None):
+        raise ValueError("latitude_and_longitude_must_be_provided_together")
+    if address.lat is not None and address.lon is not None:
+        try:
+            valid_coordinates = (
+                math.isfinite(float(address.lat))
+                and math.isfinite(float(address.lon))
+                and -90 <= float(address.lat) <= 90
+                and -180 <= float(address.lon) <= 180
+            )
+        except (TypeError, ValueError):
+            valid_coordinates = False
+        if not valid_coordinates:
+            raise ValueError("coordinates_out_of_range")
+
+    matches: list[CondoMatch] = []
+    for condo in candidates:
+        if (
+            _address_key(condo.city) != city_key
+            or (condo.street_key or _street_key(condo.street)) != street_key
+        ):
+            continue
+
+        condo_number = condo.number_key or _address_key(condo.street_number)
+        if number_key and condo_number and number_key != condo_number:
+            continue
+
+        score = 50
+        evidence = ["city_and_street"]
+        corroborated = False
+        if number_key and condo_number and number_key == condo_number:
+            score += 35
+            evidence.append("street_number")
+            corroborated = True
+
+        condo_postal = re.sub(r"\D", "", str(condo.postal_code or "")) or None
+        if postal_key and condo_postal and postal_key == condo_postal:
+            score += 5
+            evidence.append("postal_code")
+            corroborated = True
+
+        if (
+            address.lat is not None
+            and address.lon is not None
+            and condo.lat is not None and condo.lon is not None
+        ):
+            distance = _distance_m(
+                float(address.lat), float(address.lon), float(condo.lat), float(condo.lon)
+            )
+            if distance <= 25:
+                score += 10
+                evidence.append("coordinates_within_25m")
+                corroborated = True
+            elif distance <= 75:
+                score += 6
+                evidence.append("coordinates_within_75m")
+                corroborated = True
+            elif distance <= 150:
+                score += 3
+                evidence.append("coordinates_within_150m")
+                corroborated = True
+
+        # Rua/cidade sozinhas frequentemente apontariam para vários prédios.
+        if not corroborated:
+            continue
+        matches.append(CondoMatch(condominium=condo, score=score, evidence=tuple(evidence)))
+
+    return sorted(matches, key=lambda match: (-match.score, match.condominium.external_id))
 
 
 def sitemap_parts(index_xml: str) -> list[str]:
@@ -193,8 +314,8 @@ def parse_condo_page(
 ) -> CondoRow | None:
     """Lê uma página de condomínio, ou devolve None quando ela não serve.
 
-    Sem número da rua a página não responde à pergunta que a fez ser baixada, e
-    guardá-la só encheria a tabela — então ela é descartada aqui, e não depois.
+    Endereços incompletos continuam sendo condomínios válidos. Os campos de
+    chave ficam ausentes quando a página não publica os dados necessários.
     """
     achado = _NEXT_DATA.search(html)
     if achado is None:
@@ -209,8 +330,6 @@ def parse_condo_page(
 
     rua, numero = _clean(info.get("address")), _clean(info.get("number"))
     chave_rua, chave_numero = _street_key(rua), _address_key(numero)
-    if not chave_rua or not chave_numero:
-        return None
 
     features = info.get("features") if isinstance(info.get("features"), dict) else {}
     lat, lon = _float(info.get("lat")), _float(info.get("lng"))
